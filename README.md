@@ -10,7 +10,8 @@ CyncMyself is based on [cync_lights](https://github.com/nikshriv/cync_lights) by
 
 The original integration sends every command the moment Home Assistant asks for it, and resends any unacknowledged command every 0.5 s. A scene that changes a dozen lights can therefore send dozens of packets within a few seconds, and the Cync server responds by dropping commands, answering minutes late, or resetting the connection. CyncMyself paces that traffic. These changes are in `custom_components/cync_lights/cync_hub.py`:
 
-- **Send queue.** Every packet (commands, retries and pings) goes through one queue and leaves at least 0.25 s after the previous one. The gap is `SEND_SPACING` at the top of the file.
+- **Send queue.** Every light command and retry goes through one queue and leaves at least 0.25 s after the previous one. The gap is `SEND_SPACING` at the top of the file. Acknowledgements to the Cync server, pings and state requests skip the queue and go out right away, so a busy scene can't hold them up.
+- **Stale retries are dropped.** When a newer command arrives for a light, any older retries for that light stop, including ones still waiting in the queue. A retry of an old command can no longer undo a newer one.
 - **Slower retries.** An unacknowledged command is resent every 1.5 s for up to 6 s (4 attempts), instead of every 0.5 s for up to 5 s (10 attempts).
 - **Retry timer starts after sending.** The wait for an acknowledgement includes the time a packet spends in the queue, so a backlog does not set off extra retries.
 
