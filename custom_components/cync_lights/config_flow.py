@@ -125,15 +125,15 @@ class CyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 vol.Optional(
                     "rooms",
-                    description = {"suggested_value" : [room for room in self.data["data"]["cync_config"]["rooms"].keys() if not self.data["data"]["cync_config"]["rooms"][room]['isSubgroup']]},
+                    description = {"suggested_value" : []},
                 ): cv.multi_select({room : f'{room_info["name"]} ({room_info["home_name"]})' for room,room_info in self.data["data"]["cync_config"]["rooms"].items() if not self.data["data"]["cync_config"]["rooms"][room]['isSubgroup']}),
                 vol.Optional(
                     "subgroups",
-                    description = {"suggested_value" : [room for room in self.data["data"]["cync_config"]["rooms"].keys() if self.data["data"]["cync_config"]["rooms"][room]['isSubgroup']]},
+                    description = {"suggested_value" : []},
                 ): cv.multi_select({room : f'{room_info["name"]} ({room_info.get("parent_room","")}:{room_info["home_name"]})' for room,room_info in self.data["data"]["cync_config"]["rooms"].items() if self.data["data"]["cync_config"]["rooms"][room]['isSubgroup']}),
                 vol.Optional(
                     "switches",
-                    description = {"suggested_value" : [device_id for device_id,device_info in self.data["data"]["cync_config"]["devices"].items() if device_info['FAN']]},
+                    description = {"suggested_value" : [device_id for device_id,device_info in self.data["data"]["cync_config"]["devices"].items() if device_info.get('ONOFF',False) and device_info.get('MULTIELEMENT',1) == 1]},
                 ): cv.multi_select({switch_id : f'{sw_info["name"]} ({sw_info["room_name"]}:{sw_info["home_name"]})' for switch_id,sw_info in self.data["data"]["cync_config"]["devices"].items() if sw_info.get('ONOFF',False) and sw_info.get('MULTIELEMENT',1) == 1}),
                 vol.Optional(
                     "motion_sensors",
