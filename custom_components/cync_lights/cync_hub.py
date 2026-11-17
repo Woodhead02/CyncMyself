@@ -299,26 +299,40 @@ class CyncHub:
             home_id = self.switchID_to_homeID[switch_id]
             self._add_connected_devices(switch_id, home_id)
             _LOGGER.debug("Cync initial state from controller %s: %d bytes", switch_id, len(packet))
-            packet = packet[22:]
-            while len(packet) > 24:
-                deviceID = self.home_devices[home_id][int(packet[0])]
+            # Device records are 24 bytes, but they do not always start at the same
+            # offset: some messages carry an extra header byte. Reading at a fixed offset
+            # misaligned every record, so a light picked up another device's bytes (for
+            # example "on at 0%" or a false "off"). Only accept bytes that look like a
+            # record, and step forward one byte at a time until they do.
+            offset = 22
+            while offset + 24 <= len(packet):
+                record = packet[offset:offset+24]
+                if not self._is_state_record(record) or int(record[0]) >= len(self.home_devices[home_id]):
+                    offset += 1
+                    continue
+                offset += 24
+                deviceID = self.home_devices[home_id][int(record[0])]
                 if deviceID in self.cync_switches:
                     if self.cync_switches[deviceID].elements > 1:
                         for i in range(self.cync_switches[deviceID].elements):
-                            device_id = self.home_devices[home_id][(i+1)*256 + int(packet[0])]
-                            state = int((int(packet[12]) >> i) & int(packet[8])) > 0
+                            device_id = self.home_devices[home_id][(i+1)*256 + int(record[0])]
+                            state = int((int(record[12]) >> i) & int(record[8])) > 0
                             brightness = 100 if state else 0
                             self.cync_switches[device_id].update_switch(state,brightness,self.cync_switches[device_id].color_temp,self.cync_switches[device_id].rgb)
                     else:
-                        state = int(packet[8]) > 0
-                        brightness = int(packet[12]) if state else 0
-                        color_temp = int(packet[16])
-                        rgb = {'r':int(packet[20]),'g':int(packet[21]),'b':int(packet[22]),'active':int(packet[16])==254}
+                        state = int(record[8]) > 0
+                        brightness = int(record[12]) if state else 0
+                        color_temp = int(record[16])
+                        rgb = {'r':int(record[20]),'g':int(record[21]),'b':int(record[22]),'active':int(record[16])==254}
                         self.cync_switches[deviceID].update_switch(state,brightness,color_temp,rgb)
-                packet = packet[24:]
         else:
             return False
         return True
+
+    @staticmethod
+    def _is_state_record(record):
+        """A device state record repeats its 3-byte header: xx aa bb 01 00 aa bb 01."""
+        return record[3] == 1 and record[7] == 1 and record[4] == 0 and record[1:3] == record[5:7] and record[8] <= 1
 
     def _log_unhandled(self, packet_type, packet):
         if _LOGGER.isEnabledFor(logging.DEBUG):
