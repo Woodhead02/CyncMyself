@@ -1,0 +1,18 @@
+set_send_spacing:
+  name: Set send spacing
+  description: Change the gap between queued packets to the Cync server until Home Assistant restarts.
+  fields:
+    seconds:
+      name: Seconds
+      description: Gap between packets.
+      required: true
+      example: 0.25
+      selector:
+        number:
+          min: 0
+          max: 2
+          step: 0.01
+          unit_of_measurement: s
+report_stats:
+  name: Report stats
+  description: Return and log command statistics since the last report, then reset them.
