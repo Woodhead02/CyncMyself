@@ -127,14 +127,27 @@ class CyncHub:
         await self.writer.drain()
         await self.reader.read(1000)
         self.logged_in = True
+        buffer = b''
         while not self.shutting_down:
-            data = await self.reader.read(1000)
+            data = await self.reader.read(4096)
             if len(data) == 0:
                 self.logged_in = False
                 raise LostConnection
-            while len(data) >= 12:
+            # A TCP read can end partway through a packet. Keep the incomplete tail and
+            # parse it once the rest arrives, instead of discarding it and reading the
+            # following bytes out of alignment.
+            data = buffer + data
+            buffer = b''
+            while len(data) >= 5:
                 packet_type = int(data[0])
                 packet_length = struct.unpack(">I", data[1:5])[0]
+                if packet_length > 65535:
+                    # Out of alignment; drop what we have and resynchronise on the next read
+                    _LOGGER.warning("Cync: discarding %d unreadable bytes from the server", len(data))
+                    break
+                if len(data) < packet_length + 5:
+                    buffer = data
+                    break
                 packet = data[5:packet_length+5]
                 self.stats['received'][packet_type] = self.stats['received'].get(packet_type,0) + 1
                 try:
@@ -303,7 +316,7 @@ class CyncHub:
         for dev in self.cync_switches.values():
             dev.publish_update()
         for room in self.cync_rooms.values():
-            dev.publish_update()
+            room.publish_update()
 
     def send_request(self,request,current=None):
         """Queue a light command so consecutive commands leave SEND_SPACING seconds apart.
