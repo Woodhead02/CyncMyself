@@ -58,6 +58,7 @@ class CyncHub:
         self._seq_num = 0
         self.pending_commands = {}
         self._next_send_at = 0.0
+        self._last_packet = (0, b'')
         self.send_spacing = SEND_SPACING
         self.reset_stats()
         [room.initialize() for room in self.cync_rooms.values() if room.is_subgroup]
@@ -149,6 +150,7 @@ class CyncHub:
                     buffer = data
                     break
                 packet = data[5:packet_length+5]
+                self._last_packet = (packet_type, packet)
                 self.stats['received'][packet_type] = self.stats['received'].get(packet_type,0) + 1
                 try:
                     if packet_length == len(packet):
@@ -826,6 +828,11 @@ class CyncSwitch:
         if self.power_state == state and self.brightness == brightness and self.color_temp == color_temp and self.rgb == rgb:
             # The server repeats status often; only tell Home Assistant about changes
             return
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            packet_type, packet = self.hub._last_packet
+            _LOGGER.debug("%s: %s/%s -> %s/%s (ct %s rgb %s) from packet type %d: %s", self.name,
+                "on" if self.power_state else "off", self.brightness, "on" if state else "off", brightness,
+                color_temp, rgb, packet_type, packet[:96].hex())
         self.power_state = state
         self.brightness = brightness
         self.color_temp = color_temp
