@@ -1,7 +1,7 @@
 {
   "domain": "cync_lights",
   "name": "Cync Lights (CyncMyself)",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "config_flow": true,
   "documentation": "https://github.com/Woodhead02/CyncMyself",
   "ssdp": [],
