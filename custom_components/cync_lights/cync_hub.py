@@ -258,14 +258,14 @@ class CyncHub:
         while not self.connected_devices_updated:
             await asyncio.sleep(2)
         for connected_devices in self.connected_devices.values():
-            # Ask several Wi-Fi controllers for the state of the whole mesh: a single
-            # controller's answer can be missing or incomplete.
-            for device_id in connected_devices[:3]:
+            # Ask every connected Wi-Fi controller for the state it knows: a controller
+            # only reports the Bluetooth devices it can reach, so one answer is incomplete.
+            for device_id in list(connected_devices):
                 controller = self.cync_switches[device_id].switch_id
                 seq = self.get_seq_num()
                 state_request = bytes.fromhex('7300000018') + int(controller).to_bytes(4,'big') + seq.to_bytes(2,'big') + bytes.fromhex('007e00000000f85206000000ffff0000567e')
                 self.loop.call_soon_threadsafe(self.send_now,state_request)
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.2)
         while False in [self.cync_switches[dev_id]._update_callback is not None for dev_id in self.options["switches"]] and False in [self.cync_rooms[dev_id]._update_callback is not None for dev_id in self.options["rooms"]]:
             await asyncio.sleep(2)
         for dev in self.cync_switches.values():
@@ -296,6 +296,7 @@ class CyncHub:
             switch_id = str(struct.unpack(">I", packet[0:4])[0])
             home_id = self.switchID_to_homeID[switch_id]
             self._add_connected_devices(switch_id, home_id)
+            _LOGGER.debug("Cync initial state from controller %s: %d bytes", switch_id, len(packet))
             packet = packet[22:]
             while len(packet) > 24:
                 deviceID = self.home_devices[home_id][int(packet[0])]
