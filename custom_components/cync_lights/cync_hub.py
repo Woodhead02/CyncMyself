@@ -447,7 +447,9 @@ class CyncRoom:
             elif attr_rgb is not None and attr_br is None:
                 self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq, current)
             elif attr_ct is not None:
-                self.hub.turn_on(controller, self.mesh_id, seq, current)
+                if attr_br is not None or not self.power_state:
+                    # set_color_temp alone does not turn an off bulb on or change brightness
+                    self.hub.combo_control(True, round(attr_br*100/255) if attr_br is not None else (self.brightness or 100), 255, [255,255,255], controller, self.mesh_id, seq, current)
                 # Cync uses the range 0% to 100% to set the color temp, so we need to
                 # calculate the percentage of the color temp range that is being requested
                 color_temp = round(100*((attr_ct - self.min_color_temp_kelvin) / (self.max_color_temp_kelvin - self.min_color_temp_kelvin)))
@@ -609,6 +611,9 @@ class CyncSwitch:
                 # Cync uses the range 0% to 100% to set the color temp, so we need to
                 # calculate the percentage of the color temp range that is being requested
                 color_temp = round(100*((attr_ct - self.min_color_temp_kelvin) /(self.max_color_temp_kelvin - self.min_color_temp_kelvin)))
+                if attr_br is not None or not self.power_state:
+                    # set_color_temp alone does not turn an off bulb on or change brightness
+                    self.hub.combo_control(True, round(attr_br*100/255) if attr_br is not None else (self.brightness or 100), 255, [255,255,255], controller, self.mesh_id, seq, current)
                 self.hub.set_color_temp(color_temp, controller, self.mesh_id, seq, current)
             else:
                 self.hub.turn_on(controller, self.mesh_id, seq, current)
