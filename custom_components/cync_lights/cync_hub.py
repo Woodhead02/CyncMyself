@@ -76,7 +76,7 @@ class CyncHub:
             for controller in home_controllers:
                 seq = self.get_seq_num()
                 state_request = bytes.fromhex('7300000018') + int(controller).to_bytes(4,'big') + seq.to_bytes(2,'big') + bytes.fromhex('007e00000000f85206000000ffff0000567e')
-                self.loop.call_soon_threadsafe(self.send_request,state_request)
+                self.loop.call_soon_threadsafe(self.send_now,state_request)
 
     async def _connect(self):
         while not self.shutting_down:
@@ -142,7 +142,7 @@ class CyncHub:
                             #send response packet
                             response_id = struct.unpack(">H", packet[4:6])[0]
                             response_packet = bytes.fromhex('7300000007') + int(switch_id).to_bytes(4,'big') + response_id.to_bytes(2,'big') + bytes.fromhex('00')
-                            self.loop.call_soon_threadsafe(self.send_request, response_packet)
+                            self.loop.call_soon_threadsafe(self.send_now, response_packet)
 
                             if packet_length >= 33 and int(packet[13]) == 219:
                                 #parse state and brightness change packet
@@ -269,7 +269,7 @@ class CyncHub:
                     for controller in home_controllers:
                         seq = self.get_seq_num()
                         ping = bytes.fromhex('a300000007') + int(controller).to_bytes(4,'big') + seq.to_bytes(2,'big') + bytes.fromhex('00')
-                        self.loop.call_soon_threadsafe(self.send_request, ping)
+                        self.loop.call_soon_threadsafe(self.send_now, ping)
                         await asyncio.sleep(0.15)
                 await asyncio.sleep(2)
                 attempts += 1
@@ -289,7 +289,7 @@ class CyncHub:
                 controller = self.cync_switches[connected_devices[0]].switch_id
                 seq = self.get_seq_num()
                 state_request = bytes.fromhex('7300000018') + int(controller).to_bytes(4,'big') + seq.to_bytes(2,'big') + bytes.fromhex('007e00000000f85206000000ffff0000567e')
-                self.loop.call_soon_threadsafe(self.send_request,state_request)
+                self.loop.call_soon_threadsafe(self.send_now,state_request)
         while False in [self.cync_switches[dev_id]._update_callback is not None for dev_id in self.options["switches"]] and False in [self.cync_rooms[dev_id]._update_callback is not None for dev_id in self.options["rooms"]]:
             await asyncio.sleep(2)
         for dev in self.cync_switches.values():
@@ -297,14 +297,26 @@ class CyncHub:
         for room in self.cync_rooms.values():
             dev.publish_update()
 
-    def send_request(self,request):
-        """Queue a packet so consecutive packets leave SEND_SPACING seconds apart."""
+    def send_request(self,request,current=None):
+        """Queue a light command so consecutive commands leave SEND_SPACING seconds apart.
+
+        current, if given, is checked just before sending; a command that a newer
+        command for the same light has replaced is dropped instead of sent."""
         send_at = max(self.loop.time(), self._next_send_at)
         self._next_send_at = send_at + SEND_SPACING
         async def send():
             delay = send_at - self.loop.time()
             if delay > 0:
                 await asyncio.sleep(delay)
+            if current is not None and not current():
+                return
+            self.writer.write(request)
+            await self.writer.drain()
+        self.loop.create_task(send())
+
+    def send_now(self,request):
+        """Send a protocol packet (acknowledgement, ping, state request) without queueing."""
+        async def send():
             self.writer.write(request)
             await self.writer.drain()
         self.loop.create_task(send())
@@ -313,21 +325,21 @@ class CyncHub:
         """Seconds until every queued packet has been sent."""
         return max(0.0, self._next_send_at - time.monotonic())
 
-    def combo_control(self,state,brightness,color_tone,rgb,switch_id,mesh_id,seq):
+    def combo_control(self,state,brightness,color_tone,rgb,switch_id,mesh_id,seq,current=None):
         combo_request = bytes.fromhex('7300000022') + int(switch_id).to_bytes(4,'big') + int(seq).to_bytes(2,'big') + bytes.fromhex('007e00000000f8f010000000000000') + mesh_id + bytes.fromhex('f00000') + (1 if state else 0).to_bytes(1,'big')  + brightness.to_bytes(1,'big') + color_tone.to_bytes(1,'big') + rgb[0].to_bytes(1,'big') + rgb[1].to_bytes(1,'big') + rgb[2].to_bytes(1,'big') + ((496 + int(mesh_id[0]) + int(mesh_id[1]) + (1 if state else 0) + brightness + color_tone + sum(rgb))%256).to_bytes(1,'big') + bytes.fromhex('7e')
-        self.loop.call_soon_threadsafe(self.send_request,combo_request)
+        self.loop.call_soon_threadsafe(self.send_request,combo_request,current)
 
-    def turn_on(self,switch_id,mesh_id,seq):
+    def turn_on(self,switch_id,mesh_id,seq,current=None):
         power_request = bytes.fromhex('730000001f') + int(switch_id).to_bytes(4,'big') + int(seq).to_bytes(2,'big') + bytes.fromhex('007e00000000f8d00d000000000000') + mesh_id + bytes.fromhex('d00000010000') + ((430 + int(mesh_id[0]) + int(mesh_id[1]))%256).to_bytes(1,'big') + bytes.fromhex('7e')
-        self.loop.call_soon_threadsafe(self.send_request,power_request)
+        self.loop.call_soon_threadsafe(self.send_request,power_request,current)
 
-    def turn_off(self,switch_id,mesh_id,seq):
+    def turn_off(self,switch_id,mesh_id,seq,current=None):
         power_request = bytes.fromhex('730000001f') + int(switch_id).to_bytes(4,'big') + int(seq).to_bytes(2,'big') + bytes.fromhex('007e00000000f8d00d000000000000') + mesh_id + bytes.fromhex('d00000000000') + ((429 + int(mesh_id[0]) + int(mesh_id[1]))%256).to_bytes(1,'big') + bytes.fromhex('7e')
-        self.loop.call_soon_threadsafe(self.send_request,power_request)
+        self.loop.call_soon_threadsafe(self.send_request,power_request,current)
 
-    def set_color_temp(self,color_temp,switch_id,mesh_id,seq):
+    def set_color_temp(self,color_temp,switch_id,mesh_id,seq,current=None):
         color_temp_request = bytes.fromhex('730000001e') + int(switch_id).to_bytes(4,'big') + int(seq).to_bytes(2,'big') + bytes.fromhex('007e00000000f8e20c000000000000') + mesh_id + bytes.fromhex('e2000005') + color_temp.to_bytes(1,'big') + ((469 + int(mesh_id[0]) + int(mesh_id[1]) + color_temp)%256).to_bytes(1,'big') + bytes.fromhex('7e')
-        self.loop.call_soon_threadsafe(self.send_request,color_temp_request)
+        self.loop.call_soon_threadsafe(self.send_request,color_temp_request,current)
 
     def get_seq_num(self):
         if self._seq_num == 65535:
@@ -370,6 +382,7 @@ class CyncRoom:
         self.groups_support_rgb = False
         self._command_timout = 1.5
         self._command_retry_time = 6
+        self._command_gen = 0
 
     def initialize(self):
         """Initialization of supported features and registration of update function for all switches and subgroups in the room"""
@@ -413,9 +426,12 @@ class CyncRoom:
 
     async def turn_on(self, attr_rgb, attr_br, attr_ct) -> None:
         """Turn on the light."""
+        self._command_gen += 1
+        gen = self._command_gen
+        current = lambda: gen == self._command_gen
         attempts = 0
         update_received = False
-        while not update_received and attempts < int(self._command_retry_time/self._command_timout):
+        while not update_received and current() and attempts < int(self._command_retry_time/self._command_timout):
             seq = str(self.hub.get_seq_num())
             if len(self.controllers) > 0:
                 controller = self.controllers[attempts%len(self.controllers)]
@@ -423,21 +439,21 @@ class CyncRoom:
                 controller = self.default_controller
             if attr_rgb is not None and attr_br is not None:
                 if math.isclose(attr_br, max([self.rgb['r'],self.rgb['g'],self.rgb['b']])*self.brightness/100, abs_tol = 2):
-                    self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq)
+                    self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq, current)
                 else:
-                    self.hub.combo_control(True, round(attr_br*100/255), 255, [255,255,255], controller, self.mesh_id, seq)
+                    self.hub.combo_control(True, round(attr_br*100/255), 255, [255,255,255], controller, self.mesh_id, seq, current)
             elif attr_rgb is None and attr_ct is None and attr_br is not None:
-                self.hub.combo_control(True, round(attr_br*100/255), 255, [255,255,255], controller, self.mesh_id, seq)
+                self.hub.combo_control(True, round(attr_br*100/255), 255, [255,255,255], controller, self.mesh_id, seq, current)
             elif attr_rgb is not None and attr_br is None:
-                self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq)
+                self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq, current)
             elif attr_ct is not None:
-                self.hub.turn_on(controller, self.mesh_id, seq)
+                self.hub.turn_on(controller, self.mesh_id, seq, current)
                 # Cync uses the range 0% to 100% to set the color temp, so we need to
                 # calculate the percentage of the color temp range that is being requested
                 color_temp = round(100*((attr_ct - self.min_color_temp_kelvin) / (self.max_color_temp_kelvin - self.min_color_temp_kelvin)))
-                self.hub.set_color_temp(color_temp, controller, self.mesh_id, seq)
+                self.hub.set_color_temp(color_temp, controller, self.mesh_id, seq, current)
             else:
-                self.hub.turn_on(controller, self.mesh_id, seq)
+                self.hub.turn_on(controller, self.mesh_id, seq, current)
             self.hub.pending_commands[seq] = self.command_received
             await asyncio.sleep(self._command_timout + self.hub.queue_delay())
             if self.hub.pending_commands.get(seq, None) is not None:
@@ -448,15 +464,18 @@ class CyncRoom:
 
     async def turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
+        self._command_gen += 1
+        gen = self._command_gen
+        current = lambda: gen == self._command_gen
         attempts = 0
         update_received = False
-        while not update_received and attempts < int(self._command_retry_time/self._command_timout):
+        while not update_received and current() and attempts < int(self._command_retry_time/self._command_timout):
             seq = str(self.hub.get_seq_num())
             if len(self.controllers) > 0:
                 controller = self.controllers[attempts%len(self.controllers)]
             else:
                 controller = self.default_controller
-            self.hub.turn_off(controller, self.mesh_id, seq)
+            self.hub.turn_off(controller, self.mesh_id, seq, current)
             self.hub.pending_commands[seq] = self.command_received
             await asyncio.sleep(self._command_timout + self.hub.queue_delay())
             if self.hub.pending_commands.get(seq, None) is not None:
@@ -541,6 +560,7 @@ class CyncSwitch:
         self.elements = switch_info.get('MULTIELEMENT',1)
         self._command_timout = 1.5
         self._command_retry_time = 6
+        self._command_gen = 0
 
     def register(self, update_callback) -> None:
         """Register callback, called when switch changes state."""
@@ -565,9 +585,12 @@ class CyncSwitch:
 
     async def turn_on(self, attr_rgb, attr_br, attr_ct) -> None:
         """Turn on the light."""
+        self._command_gen += 1
+        gen = self._command_gen
+        current = lambda: gen == self._command_gen
         attempts = 0
         update_received = False
-        while not update_received and attempts < int(self._command_retry_time/self._command_timout):
+        while not update_received and current() and attempts < int(self._command_retry_time/self._command_timout):
             seq = str(self.hub.get_seq_num())
             if len(self.controllers) > 0:
                 controller = self.controllers[attempts%len(self.controllers)]
@@ -575,20 +598,20 @@ class CyncSwitch:
                 controller = self.default_controller
             if attr_rgb is not None and attr_br is not None:
                 if math.isclose(attr_br, max([self.rgb['r'],self.rgb['g'],self.rgb['b']])*self.brightness/100, abs_tol = 2):
-                    self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq)
+                    self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq, current)
                 else:
-                    self.hub.combo_control(True, round(attr_br*100/255), 255, [255,255,255], controller, self.mesh_id, seq)
+                    self.hub.combo_control(True, round(attr_br*100/255), 255, [255,255,255], controller, self.mesh_id, seq, current)
             elif attr_rgb is None and attr_ct is None and attr_br is not None:
-                self.hub.combo_control(True, round(attr_br*100/255), 255, [255,255,255], controller, self.mesh_id, seq)
+                self.hub.combo_control(True, round(attr_br*100/255), 255, [255,255,255], controller, self.mesh_id, seq, current)
             elif attr_rgb is not None and attr_br is None:
-                self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq)
+                self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq, current)
             elif attr_ct is not None:
                 # Cync uses the range 0% to 100% to set the color temp, so we need to
                 # calculate the percentage of the color temp range that is being requested
                 color_temp = round(100*((attr_ct - self.min_color_temp_kelvin) /(self.max_color_temp_kelvin - self.min_color_temp_kelvin)))
-                self.hub.set_color_temp(color_temp, controller, self.mesh_id, seq)
+                self.hub.set_color_temp(color_temp, controller, self.mesh_id, seq, current)
             else:
-                self.hub.turn_on(controller, self.mesh_id, seq)
+                self.hub.turn_on(controller, self.mesh_id, seq, current)
             self.hub.pending_commands[seq] = self.command_received
             await asyncio.sleep(self._command_timout + self.hub.queue_delay())
             if self.hub.pending_commands.get(seq, None) is not None:
@@ -599,15 +622,18 @@ class CyncSwitch:
 
     async def turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
+        self._command_gen += 1
+        gen = self._command_gen
+        current = lambda: gen == self._command_gen
         attempts = 0
         update_received = False
-        while not update_received and attempts < int(self._command_retry_time/self._command_timout):
+        while not update_received and current() and attempts < int(self._command_retry_time/self._command_timout):
             seq = str(self.hub.get_seq_num())
             if len(self.controllers) > 0:
                 controller = self.controllers[attempts%len(self.controllers)]
             else:
                 controller = self.default_controller
-            self.hub.turn_off(controller, self.mesh_id, seq)
+            self.hub.turn_off(controller, self.mesh_id, seq, current)
             self.hub.pending_commands[seq] = self.command_received
             await asyncio.sleep(self._command_timout + self.hub.queue_delay())
             if self.hub.pending_commands.get(seq, None) is not None:
