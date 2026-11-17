@@ -439,14 +439,13 @@ class CyncRoom:
             else:
                 controller = self.default_controller
             if attr_rgb is not None and attr_br is not None:
-                if math.isclose(attr_br, max([self.rgb['r'],self.rgb['g'],self.rgb['b']])*self.brightness/100, abs_tol = 2):
-                    self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq, current)
-                else:
-                    self.hub.combo_control(True, round(attr_br*100/255), 255, [255,255,255], controller, self.mesh_id, seq, current)
+                # Apply the color and the brightness together
+                self.hub.combo_control(True, round(attr_br*100/255), 254, attr_rgb, controller, self.mesh_id, seq, current)
             elif attr_rgb is None and attr_ct is None and attr_br is not None:
                 self.hub.combo_control(True, round(attr_br*100/255), 255, [255,255,255], controller, self.mesh_id, seq, current)
             elif attr_rgb is not None and attr_br is None:
-                self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq, current)
+                # An off light has brightness 0; turn it on at full brightness instead
+                self.hub.combo_control(True, (self.brightness if self.power_state else 0) or 100, 254, attr_rgb, controller, self.mesh_id, seq, current)
             elif attr_ct is not None:
                 if attr_br is not None or not self.power_state:
                     # set_color_temp alone does not turn an off bulb on or change brightness.
@@ -576,6 +575,7 @@ class CyncSwitch:
         self._command_timout = 1.5
         self._command_retry_time = 9
         self._command_gen = 0
+        self._state_wait = 3.0
 
     def register(self, update_callback) -> None:
         """Register callback, called when switch changes state."""
@@ -603,7 +603,9 @@ class CyncSwitch:
         self._command_gen += 1
         gen = self._command_gen
         current = lambda: gen == self._command_gen
+        expected_brightness = round(attr_br*100/255) if attr_br is not None and self.support_brightness and not self.fan else None
         attempts = 0
+        acknowledged = False
         update_received = False
         while not update_received and current() and attempts < int(self._command_retry_time/self._command_timout):
             seq = str(self.hub.get_seq_num())
@@ -613,14 +615,13 @@ class CyncSwitch:
             else:
                 controller = self.default_controller
             if attr_rgb is not None and attr_br is not None:
-                if math.isclose(attr_br, max([self.rgb['r'],self.rgb['g'],self.rgb['b']])*self.brightness/100, abs_tol = 2):
-                    self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq, current)
-                else:
-                    self.hub.combo_control(True, round(attr_br*100/255), 255, [255,255,255], controller, self.mesh_id, seq, current)
+                # Apply the color and the brightness together
+                self.hub.combo_control(True, round(attr_br*100/255), 254, attr_rgb, controller, self.mesh_id, seq, current)
             elif attr_rgb is None and attr_ct is None and attr_br is not None:
                 self.hub.combo_control(True, round(attr_br*100/255), 255, [255,255,255], controller, self.mesh_id, seq, current)
             elif attr_rgb is not None and attr_br is None:
-                self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq, current)
+                # An off light has brightness 0; turn it on at full brightness instead
+                self.hub.combo_control(True, (self.brightness if self.power_state else 0) or 100, 254, attr_rgb, controller, self.mesh_id, seq, current)
             elif attr_ct is not None:
                 # Cync uses the range 0% to 100% to set the color temp, so we need to
                 # calculate the percentage of the color temp range that is being requested
@@ -642,16 +643,27 @@ class CyncSwitch:
             if unacknowledged:
                 attempts += 1
             else:
-                update_received = True
+                acknowledged = True
+                # The server acknowledging a command does not mean the light carried it out.
+                # Wait for the light to report the requested state, and resend if it doesn't.
+                if await self._wait_for_state(True, expected_brightness, current):
+                    update_received = True
+                else:
+                    attempts += 1
         if not update_received and current():
-            _LOGGER.warning("%s: no acknowledgement from the Cync server after %d attempts", self.name, attempts)
+            if acknowledged:
+                _LOGGER.warning("%s: acknowledged but did not report the requested state after %d attempts", self.name, attempts)
+            else:
+                _LOGGER.warning("%s: no acknowledgement from the Cync server after %d attempts", self.name, attempts)
 
     async def turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
         self._command_gen += 1
         gen = self._command_gen
         current = lambda: gen == self._command_gen
+        expected_brightness = None
         attempts = 0
+        acknowledged = False
         update_received = False
         while not update_received and current() and attempts < int(self._command_retry_time/self._command_timout):
             seq = str(self.hub.get_seq_num())
@@ -669,9 +681,30 @@ class CyncSwitch:
             if unacknowledged:
                 attempts += 1
             else:
-                update_received = True
+                acknowledged = True
+                # The server acknowledging a command does not mean the light carried it out.
+                # Wait for the light to report the requested state, and resend if it doesn't.
+                if await self._wait_for_state(False, expected_brightness, current):
+                    update_received = True
+                else:
+                    attempts += 1
         if not update_received and current():
-            _LOGGER.warning("%s: no acknowledgement from the Cync server after %d attempts", self.name, attempts)
+            if acknowledged:
+                _LOGGER.warning("%s: acknowledged but did not report the requested state after %d attempts", self.name, attempts)
+            else:
+                _LOGGER.warning("%s: no acknowledgement from the Cync server after %d attempts", self.name, attempts)
+
+    async def _wait_for_state(self, power_state, brightness, current):
+        """Wait up to _state_wait seconds for the light to report the given power state and brightness."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._state_wait
+        while current():
+            if self.power_state == power_state and (brightness is None or not power_state or abs(self.brightness - brightness) <= 2):
+                return True
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(0.25)
+        return False
 
     def command_received(self, seq):
         """Remove command from hub.pending_commands when a reply is received from Cync server"""
