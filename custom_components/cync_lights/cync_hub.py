@@ -58,6 +58,8 @@ class CyncHub:
         self._seq_num = 0
         self.pending_commands = {}
         self._next_send_at = 0.0
+        self.send_spacing = SEND_SPACING
+        self.reset_stats()
         [room.initialize() for room in self.cync_rooms.values() if room.is_subgroup]
         [room.initialize() for room in self.cync_rooms.values() if not room.is_subgroup]
 
@@ -112,6 +114,7 @@ class CyncHub:
                     for task in pending:
                         task.cancel()
                     if not self.shutting_down:
+                        self.stats['resets'] += 1
                         _LOGGER.info("Connection to Cync server reset, restarting in 15 seconds")
                         await asyncio.sleep(15)
                     else:
@@ -133,6 +136,7 @@ class CyncHub:
                 packet_type = int(data[0])
                 packet_length = struct.unpack(">I", data[1:5])[0]
                 packet = data[5:packet_length+5]
+                self.stats['received'][packet_type] = self.stats['received'].get(packet_type,0) + 1
                 try:
                     if packet_length == len(packet):
                         if packet_type == 115:
@@ -229,6 +233,10 @@ class CyncHub:
                             self._add_connected_devices(switch_id, home_id)
                         elif packet_type == 123:
                             seq = str(struct.unpack(">H", packet[4:6])[0])
+                            sent_at = self._sent_at.pop(seq,None)
+                            if sent_at is not None:
+                                self.stats['acks'] += 1
+                                self.stats['latencies'].append(self.loop.time() - sent_at)
                             command_received = self.pending_commands.get(seq,None)
                             if command_received is not None:
                                 command_received(seq)
@@ -303,16 +311,52 @@ class CyncHub:
         current, if given, is checked just before sending; a command that a newer
         command for the same light has replaced is dropped instead of sent."""
         send_at = max(self.loop.time(), self._next_send_at)
-        self._next_send_at = send_at + SEND_SPACING
+        self._next_send_at = send_at + self.send_spacing
         async def send():
             delay = send_at - self.loop.time()
             if delay > 0:
                 await asyncio.sleep(delay)
             if current is not None and not current():
+                self.stats['dropped'] += 1
                 return
+            self._record_send(request)
             self.writer.write(request)
             await self.writer.drain()
         self.loop.create_task(send())
+
+    def reset_stats(self):
+        self.stats = {'sent':0,'acks':0,'dropped':0,'resets':0,'latencies':[],'received':{},'max_queue':0.0,'started':time.monotonic()}
+        self._sent_at = {}
+
+    def _record_send(self,request):
+        self.stats['sent'] += 1
+        self.stats['max_queue'] = max(self.stats['max_queue'], self.queue_delay())
+        if len(request) > 10 and request[0] == 0x73:
+            self._sent_at[str(int.from_bytes(request[9:11],'big'))] = self.loop.time()
+
+    def report_stats(self):
+        """Log and return command statistics since the last report, then reset them."""
+        st = self.stats
+        lat = sorted(st['latencies'])
+        def pct(q):
+            return round(lat[min(len(lat)-1,int(q*len(lat)))],3) if lat else None
+        report = {
+            'send_spacing': self.send_spacing,
+            'seconds': round(time.monotonic() - st['started'],1),
+            'sent': st['sent'],
+            'acked': st['acks'],
+            'unacked': len(self._sent_at),
+            'dropped_stale': st['dropped'],
+            'connection_resets': st['resets'],
+            'ack_latency_p50': pct(0.5),
+            'ack_latency_p90': pct(0.9),
+            'ack_latency_max': round(lat[-1],3) if lat else None,
+            'max_queue_seconds': round(st['max_queue'],2),
+            'received_packet_types': dict(sorted(st['received'].items())),
+        }
+        _LOGGER.warning("Cync command stats: %s", report)
+        self.reset_stats()
+        return report
 
     def send_now(self,request):
         """Send a protocol packet (acknowledgement, ping, state request) without queueing."""
