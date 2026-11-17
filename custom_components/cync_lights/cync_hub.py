@@ -11,7 +11,7 @@ from typing import Any
 _LOGGER = logging.getLogger(__name__)
 
 # Minimum gap between packets sent to the Cync cloud server, in seconds
-SEND_SPACING = 0.25
+SEND_SPACING = 0.05
 
 API_AUTH = "https://api.gelighting.com/v2/user_auth"
 API_REQUEST_CODE = "https://api.gelighting.com/v2/two_factor/email/verifycode"
@@ -161,63 +161,13 @@ class CyncHub:
                             response_packet = bytes.fromhex('7300000007') + int(switch_id).to_bytes(4,'big') + response_id.to_bytes(2,'big') + bytes.fromhex('00')
                             self.loop.call_soon_threadsafe(self.send_now, response_packet)
 
-                            if packet_length >= 33 and int(packet[13]) == 219:
-                                #parse state and brightness change packet
-                                deviceID = self.home_devices[home_id][int(packet[21])]
-                                state = int(packet[27]) > 0
-                                brightness = int(packet[28]) if state else 0
-                                if deviceID in self.cync_switches:
-                                    self.cync_switches[deviceID].update_switch(state,brightness,self.cync_switches[deviceID].color_temp,self.cync_switches[deviceID].rgb)
-                            elif packet_length >= 25 and int(packet[13]) == 84:
-                                #parse motion and ambient light sensor packet
-                                deviceID = self.home_devices[home_id][int(packet[16])]
-                                motion = int(packet[22]) > 0
-                                ambient_light = int(packet[24]) > 0
-                                if deviceID in self.cync_motion_sensors:
-                                    self.cync_motion_sensors[deviceID].update_motion_sensor(motion)
-                                if deviceID in self.cync_ambient_light_sensors:
-                                    self.cync_ambient_light_sensors[deviceID].update_ambient_light_sensor(ambient_light)
-                            elif packet_length > 51 and int(packet[13]) == 82:
-                                #parse initial state packet
-                                switch_id = str(struct.unpack(">I", packet[0:4])[0])
-                                home_id = self.switchID_to_homeID[switch_id]
-                                self._add_connected_devices(switch_id, home_id)
-                                packet = packet[22:]
-                                while len(packet) > 24:
-                                    deviceID = self.home_devices[home_id][int(packet[0])]
-                                    if deviceID in self.cync_switches:
-                                        if self.cync_switches[deviceID].elements > 1:
-                                            for i in range(self.cync_switches[deviceID].elements):
-                                                device_id = self.home_devices[home_id][(i+1)*256 + int(packet[0])]
-                                                state = int((int(packet[12]) >> i) & int(packet[8])) > 0
-                                                brightness = 100 if state else 0
-                                                self.cync_switches[device_id].update_switch(state,brightness,self.cync_switches[device_id].color_temp,self.cync_switches[device_id].rgb)
-                                        else:
-                                            state = int(packet[8]) > 0
-                                            brightness = int(packet[12]) if state else 0
-                                            color_temp = int(packet[16])
-                                            rgb = {'r':int(packet[20]),'g':int(packet[21]),'b':int(packet[22]),'active':int(packet[16])==254}
-                                            self.cync_switches[deviceID].update_switch(state,brightness,color_temp,rgb)
-                                    packet = packet[24:]
+                            if not self._handle_status(home_id, packet, packet_length):
+                                self._log_unhandled(packet_type, packet)
                         elif packet_type == 131:
                             switch_id = str(struct.unpack(">I", packet[0:4])[0])
                             home_id = self.switchID_to_homeID[switch_id]
-                            if packet_length >= 33 and int(packet[13]) == 219:
-                                #parse state and brightness change packet
-                                deviceID = self.home_devices[home_id][int(packet[21])]
-                                state = int(packet[27]) > 0
-                                brightness = int(packet[28]) if state else 0
-                                if deviceID in self.cync_switches:
-                                    self.cync_switches[deviceID].update_switch(state,brightness,self.cync_switches[deviceID].color_temp,self.cync_switches[deviceID].rgb)
-                            elif packet_length >= 25 and int(packet[13]) == 84:
-                                #parse motion and ambient light sensor packet
-                                deviceID = self.home_devices[home_id][int(packet[16])]
-                                motion = int(packet[22]) > 0
-                                ambient_light = int(packet[24]) > 0
-                                if deviceID in self.cync_motion_sensors:
-                                    self.cync_motion_sensors[deviceID].update_motion_sensor(motion)
-                                if deviceID in self.cync_ambient_light_sensors:
-                                    self.cync_ambient_light_sensors[deviceID].update_ambient_light_sensor(ambient_light)
+                            if not self._handle_status(home_id, packet, packet_length):
+                                self._log_unhandled(packet_type, packet)
                         elif packet_type == 67 and packet_length >= 26 and int(packet[4]) == 1 and int(packet[5]) == 1 and int(packet[6]) == 6:
                             #parse state packet
                             switch_id = str(struct.unpack(">I", packet[0:4])[0])
@@ -253,6 +203,8 @@ class CyncHub:
                             command_received = self.pending_commands.get(seq,None)
                             if command_received is not None:
                                 command_received(seq)
+                        else:
+                            self._log_unhandled(packet_type, packet)
                 except Exception as e:
                     _LOGGER.error(e)
                 data = data[packet_length+5:]
@@ -306,17 +258,68 @@ class CyncHub:
         while not self.connected_devices_updated:
             await asyncio.sleep(2)
         for connected_devices in self.connected_devices.values():
-            if len(connected_devices) > 0:
-                controller = self.cync_switches[connected_devices[0]].switch_id
+            # Ask several Wi-Fi controllers for the state of the whole mesh: a single
+            # controller's answer can be missing or incomplete.
+            for device_id in connected_devices[:3]:
+                controller = self.cync_switches[device_id].switch_id
                 seq = self.get_seq_num()
                 state_request = bytes.fromhex('7300000018') + int(controller).to_bytes(4,'big') + seq.to_bytes(2,'big') + bytes.fromhex('007e00000000f85206000000ffff0000567e')
                 self.loop.call_soon_threadsafe(self.send_now,state_request)
+                await asyncio.sleep(0.5)
         while False in [self.cync_switches[dev_id]._update_callback is not None for dev_id in self.options["switches"]] and False in [self.cync_rooms[dev_id]._update_callback is not None for dev_id in self.options["rooms"]]:
             await asyncio.sleep(2)
         for dev in self.cync_switches.values():
             dev.publish_update()
         for room in self.cync_rooms.values():
             room.publish_update()
+
+    def _handle_status(self, home_id, packet, packet_length):
+        """Parse a device status message (sent as type 115 or 131)."""
+        if packet_length >= 33 and int(packet[13]) == 219:
+            #parse state and brightness change packet
+            deviceID = self.home_devices[home_id][int(packet[21])]
+            state = int(packet[27]) > 0
+            brightness = int(packet[28]) if state else 0
+            if deviceID in self.cync_switches:
+                self.cync_switches[deviceID].update_switch(state,brightness,self.cync_switches[deviceID].color_temp,self.cync_switches[deviceID].rgb)
+        elif packet_length >= 25 and int(packet[13]) == 84:
+            #parse motion and ambient light sensor packet
+            deviceID = self.home_devices[home_id][int(packet[16])]
+            motion = int(packet[22]) > 0
+            ambient_light = int(packet[24]) > 0
+            if deviceID in self.cync_motion_sensors:
+                self.cync_motion_sensors[deviceID].update_motion_sensor(motion)
+            if deviceID in self.cync_ambient_light_sensors:
+                self.cync_ambient_light_sensors[deviceID].update_ambient_light_sensor(ambient_light)
+        elif packet_length > 51 and int(packet[13]) == 82:
+            #parse initial state packet
+            switch_id = str(struct.unpack(">I", packet[0:4])[0])
+            home_id = self.switchID_to_homeID[switch_id]
+            self._add_connected_devices(switch_id, home_id)
+            packet = packet[22:]
+            while len(packet) > 24:
+                deviceID = self.home_devices[home_id][int(packet[0])]
+                if deviceID in self.cync_switches:
+                    if self.cync_switches[deviceID].elements > 1:
+                        for i in range(self.cync_switches[deviceID].elements):
+                            device_id = self.home_devices[home_id][(i+1)*256 + int(packet[0])]
+                            state = int((int(packet[12]) >> i) & int(packet[8])) > 0
+                            brightness = 100 if state else 0
+                            self.cync_switches[device_id].update_switch(state,brightness,self.cync_switches[device_id].color_temp,self.cync_switches[device_id].rgb)
+                    else:
+                        state = int(packet[8]) > 0
+                        brightness = int(packet[12]) if state else 0
+                        color_temp = int(packet[16])
+                        rgb = {'r':int(packet[20]),'g':int(packet[21]),'b':int(packet[22]),'active':int(packet[16])==254}
+                        self.cync_switches[deviceID].update_switch(state,brightness,color_temp,rgb)
+                packet = packet[24:]
+        else:
+            return False
+        return True
+
+    def _log_unhandled(self, packet_type, packet):
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug("Cync unhandled packet type %d length %d: %s", packet_type, len(packet), packet[:64].hex())
 
     def send_request(self,request,current=None):
         """Queue a light command so consecutive commands leave SEND_SPACING seconds apart.
@@ -517,9 +520,21 @@ class CyncRoom:
             else:
                 self.hub.turn_on(controller, self.mesh_id, seq, current)
             sent = [seq] + extra_seqs
+            # Stop waiting as soon as the server has acknowledged every packet
+            acked = asyncio.Event()
+            remaining = set(sent)
+            loop = asyncio.get_running_loop()
+            def on_ack(ack_seq, remaining=remaining, acked=acked, loop=loop):
+                self.hub.pending_commands.pop(ack_seq, None)
+                remaining.discard(ack_seq)
+                if not remaining:
+                    loop.call_soon_threadsafe(acked.set)
             for sent_seq in sent:
-                self.hub.pending_commands[sent_seq] = self.command_received
-            await asyncio.sleep(self._command_timout + self.hub.queue_delay())
+                self.hub.pending_commands[sent_seq] = on_ack
+            try:
+                await asyncio.wait_for(acked.wait(), self._command_timout + self.hub.queue_delay())
+            except asyncio.TimeoutError:
+                pass
             unacknowledged = [sent_seq for sent_seq in sent if self.hub.pending_commands.pop(sent_seq, None) is not None]
             if unacknowledged:
                 attempts += 1
@@ -544,9 +559,21 @@ class CyncRoom:
                 controller = self.default_controller
             self.hub.turn_off(controller, self.mesh_id, seq, current)
             sent = [seq] + extra_seqs
+            # Stop waiting as soon as the server has acknowledged every packet
+            acked = asyncio.Event()
+            remaining = set(sent)
+            loop = asyncio.get_running_loop()
+            def on_ack(ack_seq, remaining=remaining, acked=acked, loop=loop):
+                self.hub.pending_commands.pop(ack_seq, None)
+                remaining.discard(ack_seq)
+                if not remaining:
+                    loop.call_soon_threadsafe(acked.set)
             for sent_seq in sent:
-                self.hub.pending_commands[sent_seq] = self.command_received
-            await asyncio.sleep(self._command_timout + self.hub.queue_delay())
+                self.hub.pending_commands[sent_seq] = on_ack
+            try:
+                await asyncio.wait_for(acked.wait(), self._command_timout + self.hub.queue_delay())
+            except asyncio.TimeoutError:
+                pass
             unacknowledged = [sent_seq for sent_seq in sent if self.hub.pending_commands.pop(sent_seq, None) is not None]
             if unacknowledged:
                 attempts += 1
@@ -693,9 +720,21 @@ class CyncSwitch:
             else:
                 self.hub.turn_on(controller, self.mesh_id, seq, current)
             sent = [seq] + extra_seqs
+            # Stop waiting as soon as the server has acknowledged every packet
+            acked = asyncio.Event()
+            remaining = set(sent)
+            loop = asyncio.get_running_loop()
+            def on_ack(ack_seq, remaining=remaining, acked=acked, loop=loop):
+                self.hub.pending_commands.pop(ack_seq, None)
+                remaining.discard(ack_seq)
+                if not remaining:
+                    loop.call_soon_threadsafe(acked.set)
             for sent_seq in sent:
-                self.hub.pending_commands[sent_seq] = self.command_received
-            await asyncio.sleep(self._command_timout + self.hub.queue_delay())
+                self.hub.pending_commands[sent_seq] = on_ack
+            try:
+                await asyncio.wait_for(acked.wait(), self._command_timout + self.hub.queue_delay())
+            except asyncio.TimeoutError:
+                pass
             unacknowledged = [sent_seq for sent_seq in sent if self.hub.pending_commands.pop(sent_seq, None) is not None]
             if unacknowledged:
                 attempts += 1
@@ -731,9 +770,21 @@ class CyncSwitch:
                 controller = self.default_controller
             self.hub.turn_off(controller, self.mesh_id, seq, current)
             sent = [seq] + extra_seqs
+            # Stop waiting as soon as the server has acknowledged every packet
+            acked = asyncio.Event()
+            remaining = set(sent)
+            loop = asyncio.get_running_loop()
+            def on_ack(ack_seq, remaining=remaining, acked=acked, loop=loop):
+                self.hub.pending_commands.pop(ack_seq, None)
+                remaining.discard(ack_seq)
+                if not remaining:
+                    loop.call_soon_threadsafe(acked.set)
             for sent_seq in sent:
-                self.hub.pending_commands[sent_seq] = self.command_received
-            await asyncio.sleep(self._command_timout + self.hub.queue_delay())
+                self.hub.pending_commands[sent_seq] = on_ack
+            try:
+                await asyncio.wait_for(acked.wait(), self._command_timout + self.hub.queue_delay())
+            except asyncio.TimeoutError:
+                pass
             unacknowledged = [sent_seq for sent_seq in sent if self.hub.pending_commands.pop(sent_seq, None) is not None]
             if unacknowledged:
                 attempts += 1
@@ -770,12 +821,14 @@ class CyncSwitch:
 
     def update_switch(self,state,brightness,color_temp,rgb):
         """Update the state of the switch as updates are received from the Cync server"""
-        self.update_received = True
-        if self.power_state != state or self.brightness != brightness or self.color_temp != color_temp or self.rgb != rgb:
-            self.power_state = state
-            self.brightness = brightness if self.support_brightness and state else 100 if state else 0
-            self.color_temp = color_temp
-            self.rgb = rgb
+        brightness = brightness if self.support_brightness and state else 100 if state else 0
+        if self.power_state == state and self.brightness == brightness and self.color_temp == color_temp and self.rgb == rgb:
+            # The server repeats status often; only tell Home Assistant about changes
+            return
+        self.power_state = state
+        self.brightness = brightness
+        self.color_temp = color_temp
+        self.rgb = rgb
         self.publish_update()
         if self._update_parent_room:
             self._update_parent_room()
