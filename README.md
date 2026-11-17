@@ -12,6 +12,7 @@ The original integration sends every command the moment Home Assistant asks for 
 
 - **Send queue.** Every light command and retry goes through one queue and leaves at least 0.25 s after the previous one. The gap is `SEND_SPACING` at the top of the file. Acknowledgements to the Cync server, pings and state requests skip the queue and go out right away, so a busy scene can't hold them up.
 - **Stale retries are dropped.** When a newer command arrives for a light, any older retries for that light stop, including ones still waiting in the queue. A retry of an old command can no longer undo a newer one.
+- **Color temperature turns the bulb on.** Setting a color temperature on an off bulb (as scenes do) used to change nothing, and any brightness in the same command was ignored. The bulb is now switched on at the requested brightness first, then set to the color temperature.
 - **Slower retries.** An unacknowledged command is resent every 1.5 s for up to 6 s (4 attempts), instead of every 0.5 s for up to 5 s (10 attempts).
 - **Retry timer starts after sending.** The wait for an acknowledgement includes the time a packet spends in the queue, so a backlog does not set off extra retries.
 
