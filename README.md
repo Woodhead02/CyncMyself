@@ -17,6 +17,7 @@ The original integration sends every command the moment Home Assistant asks for 
 - **Checks that the light actually changed.** The Cync server acknowledges a command when it receives it, not when the light carries it out. After the acknowledgement, CyncMyself waits up to 3 s for the light to report the requested on/off state and brightness, and resends the command if it doesn't. A light that never reports the right state gets a warning in the log.
 - **Color works on its own and with brightness.** Setting a color on an off bulb turns it on at full brightness (it used to stay off), and a color sent with a brightness now applies both (the color used to be dropped).
 - **Retry timer starts after sending.** The wait for an acknowledgement includes the time a packet spends in the queue, so a backlog does not set off extra retries.
+- **Rate diagnostics.** Two services help tune the send rate. `cync_lights.set_send_spacing` (field `seconds`) changes the gap between queued packets until Home Assistant restarts. `cync_lights.report_stats` returns and logs what happened since the last report: packets sent, acknowledged and unacknowledged, stale retries dropped, connection resets, acknowledgement latency, and the longest queue backlog. Calling it resets the counters.
 
 A scene that changes 11 lights now takes about 3 seconds to send instead of going out in one burst.
 
