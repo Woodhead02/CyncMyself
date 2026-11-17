@@ -381,7 +381,7 @@ class CyncRoom:
         self.groups_support_color_temp = False
         self.groups_support_rgb = False
         self._command_timout = 1.5
-        self._command_retry_time = 6
+        self._command_retry_time = 9
         self._command_gen = 0
 
     def initialize(self):
@@ -433,6 +433,7 @@ class CyncRoom:
         update_received = False
         while not update_received and current() and attempts < int(self._command_retry_time/self._command_timout):
             seq = str(self.hub.get_seq_num())
+            extra_seqs = []
             if len(self.controllers) > 0:
                 controller = self.controllers[attempts%len(self.controllers)]
             else:
@@ -448,21 +449,28 @@ class CyncRoom:
                 self.hub.combo_control(True, self.brightness, 254, attr_rgb, controller, self.mesh_id, seq, current)
             elif attr_ct is not None:
                 if attr_br is not None or not self.power_state:
-                    # set_color_temp alone does not turn an off bulb on or change brightness
-                    self.hub.combo_control(True, round(attr_br*100/255) if attr_br is not None else (self.brightness or 100), 255, [255,255,255], controller, self.mesh_id, seq, current)
+                    # set_color_temp alone does not turn an off bulb on or change brightness.
+                    # Each packet gets its own sequence number so the server acknowledges both.
+                    on_seq = str(self.hub.get_seq_num())
+                    extra_seqs.append(on_seq)
+                    self.hub.combo_control(True, round(attr_br*100/255) if attr_br is not None else (self.brightness or 100), 255, [255,255,255], controller, self.mesh_id, on_seq, current)
                 # Cync uses the range 0% to 100% to set the color temp, so we need to
                 # calculate the percentage of the color temp range that is being requested
                 color_temp = round(100*((attr_ct - self.min_color_temp_kelvin) / (self.max_color_temp_kelvin - self.min_color_temp_kelvin)))
                 self.hub.set_color_temp(color_temp, controller, self.mesh_id, seq, current)
             else:
                 self.hub.turn_on(controller, self.mesh_id, seq, current)
-            self.hub.pending_commands[seq] = self.command_received
+            sent = [seq] + extra_seqs
+            for sent_seq in sent:
+                self.hub.pending_commands[sent_seq] = self.command_received
             await asyncio.sleep(self._command_timout + self.hub.queue_delay())
-            if self.hub.pending_commands.get(seq, None) is not None:
-                self.hub.pending_commands.pop(seq)
+            unacknowledged = [sent_seq for sent_seq in sent if self.hub.pending_commands.pop(sent_seq, None) is not None]
+            if unacknowledged:
                 attempts += 1
             else:
                 update_received = True
+        if not update_received and current():
+            _LOGGER.warning("%s: no acknowledgement from the Cync server after %d attempts", self.name, attempts)
 
     async def turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
@@ -473,18 +481,23 @@ class CyncRoom:
         update_received = False
         while not update_received and current() and attempts < int(self._command_retry_time/self._command_timout):
             seq = str(self.hub.get_seq_num())
+            extra_seqs = []
             if len(self.controllers) > 0:
                 controller = self.controllers[attempts%len(self.controllers)]
             else:
                 controller = self.default_controller
             self.hub.turn_off(controller, self.mesh_id, seq, current)
-            self.hub.pending_commands[seq] = self.command_received
+            sent = [seq] + extra_seqs
+            for sent_seq in sent:
+                self.hub.pending_commands[sent_seq] = self.command_received
             await asyncio.sleep(self._command_timout + self.hub.queue_delay())
-            if self.hub.pending_commands.get(seq, None) is not None:
-                self.hub.pending_commands.pop(seq)
+            unacknowledged = [sent_seq for sent_seq in sent if self.hub.pending_commands.pop(sent_seq, None) is not None]
+            if unacknowledged:
                 attempts += 1
             else:
                 update_received = True
+        if not update_received and current():
+            _LOGGER.warning("%s: no acknowledgement from the Cync server after %d attempts", self.name, attempts)
 
     def command_received(self, seq):
         """Remove command from hub.pending_commands when a reply is received from Cync server"""
@@ -561,7 +574,7 @@ class CyncSwitch:
         self.fan = switch_info.get('FAN',False)
         self.elements = switch_info.get('MULTIELEMENT',1)
         self._command_timout = 1.5
-        self._command_retry_time = 6
+        self._command_retry_time = 9
         self._command_gen = 0
 
     def register(self, update_callback) -> None:
@@ -594,6 +607,7 @@ class CyncSwitch:
         update_received = False
         while not update_received and current() and attempts < int(self._command_retry_time/self._command_timout):
             seq = str(self.hub.get_seq_num())
+            extra_seqs = []
             if len(self.controllers) > 0:
                 controller = self.controllers[attempts%len(self.controllers)]
             else:
@@ -612,18 +626,25 @@ class CyncSwitch:
                 # calculate the percentage of the color temp range that is being requested
                 color_temp = round(100*((attr_ct - self.min_color_temp_kelvin) /(self.max_color_temp_kelvin - self.min_color_temp_kelvin)))
                 if attr_br is not None or not self.power_state:
-                    # set_color_temp alone does not turn an off bulb on or change brightness
-                    self.hub.combo_control(True, round(attr_br*100/255) if attr_br is not None else (self.brightness or 100), 255, [255,255,255], controller, self.mesh_id, seq, current)
+                    # set_color_temp alone does not turn an off bulb on or change brightness.
+                    # Each packet gets its own sequence number so the server acknowledges both.
+                    on_seq = str(self.hub.get_seq_num())
+                    extra_seqs.append(on_seq)
+                    self.hub.combo_control(True, round(attr_br*100/255) if attr_br is not None else (self.brightness or 100), 255, [255,255,255], controller, self.mesh_id, on_seq, current)
                 self.hub.set_color_temp(color_temp, controller, self.mesh_id, seq, current)
             else:
                 self.hub.turn_on(controller, self.mesh_id, seq, current)
-            self.hub.pending_commands[seq] = self.command_received
+            sent = [seq] + extra_seqs
+            for sent_seq in sent:
+                self.hub.pending_commands[sent_seq] = self.command_received
             await asyncio.sleep(self._command_timout + self.hub.queue_delay())
-            if self.hub.pending_commands.get(seq, None) is not None:
-                self.hub.pending_commands.pop(seq)
+            unacknowledged = [sent_seq for sent_seq in sent if self.hub.pending_commands.pop(sent_seq, None) is not None]
+            if unacknowledged:
                 attempts += 1
             else:
                 update_received = True
+        if not update_received and current():
+            _LOGGER.warning("%s: no acknowledgement from the Cync server after %d attempts", self.name, attempts)
 
     async def turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
@@ -634,18 +655,23 @@ class CyncSwitch:
         update_received = False
         while not update_received and current() and attempts < int(self._command_retry_time/self._command_timout):
             seq = str(self.hub.get_seq_num())
+            extra_seqs = []
             if len(self.controllers) > 0:
                 controller = self.controllers[attempts%len(self.controllers)]
             else:
                 controller = self.default_controller
             self.hub.turn_off(controller, self.mesh_id, seq, current)
-            self.hub.pending_commands[seq] = self.command_received
+            sent = [seq] + extra_seqs
+            for sent_seq in sent:
+                self.hub.pending_commands[sent_seq] = self.command_received
             await asyncio.sleep(self._command_timout + self.hub.queue_delay())
-            if self.hub.pending_commands.get(seq, None) is not None:
-                self.hub.pending_commands.pop(seq)
+            unacknowledged = [sent_seq for sent_seq in sent if self.hub.pending_commands.pop(sent_seq, None) is not None]
+            if unacknowledged:
                 attempts += 1
             else:
                 update_received = True
+        if not update_received and current():
+            _LOGGER.warning("%s: no acknowledgement from the Cync server after %d attempts", self.name, attempts)
 
     def command_received(self, seq):
         """Remove command from hub.pending_commands when a reply is received from Cync server"""
